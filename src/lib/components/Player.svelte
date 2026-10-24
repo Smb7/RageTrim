@@ -277,7 +277,7 @@
       {busy ? `${busy}${progress ? ` ${progress}%` : ""}` : "Export"}
     </button>
     {#if !ffmpegReady}
-      <p class="muted">FFmpeg is missing. Locate ffmpeg.exe in the sidebar.</p>
+      <p role="alert">video tools failed to load</p>
     {/if}
     {#if exportedPath}
       <code title={exportedPath}>{exportedPath}</code>

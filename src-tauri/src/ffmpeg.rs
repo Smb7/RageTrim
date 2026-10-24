@@ -121,9 +121,20 @@ fn copy_extension(file_name: &str) -> &'static str {
     }
 }
 
-pub fn find_tool(name: &str, configured: Option<&Path>) -> Option<PathBuf> {
+pub fn find_tool(
+    name: &str,
+    configured: Option<&Path>,
+    bundled_dirs: &[PathBuf],
+) -> Option<PathBuf> {
+    let file_name = tool_file_name(name);
+    for dir in bundled_dirs {
+        let candidate = dir.join(&file_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
     if let Some(path) = configured {
-        let sibling = path.with_file_name(tool_file_name(name));
+        let sibling = path.with_file_name(&file_name);
         if sibling.is_file() {
             return Some(sibling);
         }
@@ -134,10 +145,42 @@ pub fn find_tool(name: &str, configured: Option<&Path>) -> Option<PathBuf> {
     app_tool(name).filter(|path| path.is_file())
 }
 
-pub fn is_ffmpeg_binary(path: &Path) -> bool {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .is_some_and(|stem| stem.eq_ignore_ascii_case("ffmpeg"))
+pub fn bundled_tool_dirs(resource_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(dir) = resource_dir {
+        push_install_dirs(&mut dirs, dir);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push_install_dirs(&mut dirs, dir);
+            push_dev_dirs(&mut dirs, dir);
+        }
+    }
+    dirs
+}
+
+fn push_install_dirs(dirs: &mut Vec<PathBuf>, base: &Path) {
+    push_unique(dirs, base.join("ffmpeg"));
+    push_unique(dirs, base.join("resources").join("ffmpeg"));
+    push_unique(dirs, base.to_path_buf());
+    push_unique(dirs, base.join("resources"));
+}
+
+fn push_dev_dirs(dirs: &mut Vec<PathBuf>, start: &Path) {
+    let mut cursor = Some(start.to_path_buf());
+    for _ in 0..6 {
+        let Some(dir) = cursor else {
+            break;
+        };
+        push_unique(dirs, dir.join("src-tauri").join("resources").join("ffmpeg"));
+        cursor = dir.parent().map(|path| path.to_path_buf());
+    }
+}
+
+fn push_unique(dirs: &mut Vec<PathBuf>, path: PathBuf) {
+    if !dirs.iter().any(|dir| dir == &path) {
+        dirs.push(path);
+    }
 }
 
 pub fn export_args(
@@ -230,9 +273,12 @@ pub fn thumbnail_args(input: &Path, output: &Path, start: &str) -> Vec<OsString>
 
 pub fn run_quiet(tool: &Path, args: &[OsString]) -> Result<(), Error> {
     if !tool.is_file() {
-        return Err(Error::message("FFmpeg was not found."));
+        return Err(Error::message("video tools failed to load"));
     }
     let mut command = Command::new(tool);
+    if let Some(dir) = tool.parent() {
+        command.current_dir(dir);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -321,9 +367,12 @@ pub fn run_tool(
     duration_ms: i64,
 ) -> Result<(), Error> {
     if !tool.is_file() {
-        return Err(Error::message("FFmpeg was not found."));
+        return Err(Error::message("video tools failed to load"));
     }
     let mut command = Command::new(tool);
+    if let Some(dir) = tool.parent() {
+        command.current_dir(dir);
+    }
     command
         .args(args)
         .stdin(Stdio::null())
@@ -388,9 +437,12 @@ pub fn run_tool(
 
 pub fn probe_file(ffprobe: &Path, input: &Path) -> Result<Probe, Error> {
     if !ffprobe.is_file() {
-        return Err(Error::message("FFprobe was not found."));
+        return Err(Error::message("video tools failed to load"));
     }
     let mut command = Command::new(ffprobe);
+    if let Some(dir) = ffprobe.parent() {
+        command.current_dir(dir);
+    }
     command
         .arg("-v")
         .arg("error")
@@ -595,6 +647,22 @@ mod tests {
         assert_eq!(probe.duration_ms, Some(12_500));
         assert_eq!(probe.video_codec.as_deref(), Some("hevc"));
         assert_eq!(probe.height, Some(1080));
+    }
+
+    #[test]
+    fn bundled_directory_is_used_before_a_saved_path() {
+        let dir = std::env::temp_dir().join(format!("ragetrim-tool-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join(tool_file_name("ffmpeg"));
+        std::fs::write(&tool, b"bundled").unwrap();
+        let found = find_tool(
+            "ffmpeg",
+            Some(Path::new(r"C:\missing\ffmpeg.exe")),
+            &[dir.clone()],
+        );
+        assert_eq!(found.as_deref(), Some(tool.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

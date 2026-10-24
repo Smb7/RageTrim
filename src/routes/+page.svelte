@@ -11,7 +11,6 @@
     getSettings,
     listClips,
     listFolders,
-    pickFfmpeg,
     pickFolder,
     removeFolder,
     scanFolders,
@@ -19,7 +18,6 @@
     setEdited,
     setPosted,
     setExportDir,
-    setFfmpegPath,
     setViewed,
     testDiscordWebhook,
   } from "$lib/api";
@@ -143,17 +141,6 @@
     }
   }
 
-  async function locateFfmpeg() {
-    error = "";
-    try {
-      const path = await pickFfmpeg();
-      if (!path) return;
-      settings = await setFfmpegPath(path);
-    } catch (err) {
-      error = errorText(err);
-    }
-  }
-
   function replaceClip(updated: Clip) {
     clips = clips.map((item) => (item.id === updated.id ? updated : item));
   }
@@ -268,8 +255,9 @@
           <h2>Export</h2>
           <p title={settings.exportDir}>{shortPath(settings.exportDir)}</p>
           <button class="ghost" type="button" disabled={busy} onclick={chooseExportDir}>Change folder</button>
-          <p>{settings.ffmpegPath ? "FFmpeg found" : "FFmpeg missing"}</p>
-          <button class="ghost" type="button" disabled={busy} onclick={locateFfmpeg}>Locate FFmpeg</button>
+          {#if !settings.ffmpegPath || !settings.ffprobePath}
+            <p role="alert">video tools failed to load</p>
+          {/if}
         </div>
         <div class="tool-box">
           <h2>Discord</h2>
