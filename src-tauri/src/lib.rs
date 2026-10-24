@@ -1,4 +1,5 @@
 mod db;
+mod discord;
 mod error;
 mod ffmpeg;
 mod models;
@@ -80,6 +81,76 @@ fn set_viewed(state: State<AppState>, id: i64, viewed: bool) -> Result<Clip, Err
 fn set_edited(state: State<AppState>, id: i64, edited: bool) -> Result<Clip, Error> {
     let db = lock_db(&state)?;
     db.set_edited(id, edited)
+}
+
+#[tauri::command]
+fn set_posted(state: State<AppState>, id: i64, posted: bool) -> Result<Clip, Error> {
+    let db = lock_db(&state)?;
+    db.set_posted(id, posted)
+}
+
+#[tauri::command]
+fn discord_status() -> Result<discord::DiscordStatus, Error> {
+    discord::status()
+}
+
+#[tauri::command]
+fn save_discord_webhook(url: String) -> Result<discord::DiscordStatus, Error> {
+    discord::save_webhook(&url)?;
+    discord::status()
+}
+
+#[tauri::command]
+fn clear_discord_webhook() -> Result<discord::DiscordStatus, Error> {
+    discord::clear_webhook()?;
+    discord::status()
+}
+
+#[tauri::command]
+fn test_discord_webhook() -> Result<discord::WebhookCheck, Error> {
+    discord::test_webhook()
+}
+
+#[tauri::command]
+fn post_clip(state: State<AppState>, id: i64, message: String) -> Result<Clip, Error> {
+    let _job = begin_job(&state)?;
+    let (path, file_name) = {
+        let db = lock_db(&state)?;
+        let clip = db.clip_by_id(id)?;
+        if clip.missing {
+            return Err(Error::message("That clip is missing."));
+        }
+        let Some((path, _, _)) = db.latest_export(id)? else {
+            return Err(Error::message("Export a trim before posting."));
+        };
+        let export_dir = db.export_dir()?;
+        let path = PathBuf::from(path);
+        if !export_is_inside(&export_dir, &path) {
+            return Err(Error::message("That export is outside the export folder."));
+        }
+        if !path.is_file() {
+            return Err(Error::message("That export is missing. Trim it again."));
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&clip.file_name)
+            .to_string();
+        (path, file_name)
+    };
+    discord::post_file(&path, &file_name, &message)?;
+    let db = lock_db(&state)?;
+    db.set_posted(id, true)
+}
+
+fn export_is_inside(root: &Path, candidate: &Path) -> bool {
+    let Ok(root) = dunce::canonicalize(root) else {
+        return false;
+    };
+    let Ok(candidate) = dunce::canonicalize(candidate) else {
+        return false;
+    };
+    candidate.starts_with(root)
 }
 
 #[tauri::command]
@@ -266,7 +337,7 @@ fn required_tool(db: &Database, name: &str) -> Result<PathBuf, Error> {
 fn begin_job(state: &AppState) -> Result<BusyGuard, Error> {
     let busy = Arc::clone(&state.busy);
     if busy.swap(true, Ordering::SeqCst) {
-        return Err(Error::message("FFmpeg is already running."));
+        return Err(Error::message("Wait for the current job to finish."));
     }
     Ok(BusyGuard(busy))
 }
@@ -342,6 +413,12 @@ pub fn run() {
             list_clips,
             set_viewed,
             set_edited,
+            set_posted,
+            discord_status,
+            save_discord_webhook,
+            clear_discord_webhook,
+            test_discord_webhook,
+            post_clip,
             get_settings,
             set_export_dir,
             set_compress_target,

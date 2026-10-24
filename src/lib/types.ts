@@ -18,6 +18,15 @@ export type Clip = {
   height: number | null;
   videoCodec: string | null;
   editedAt: number | null;
+  postedAt: number | null;
+};
+
+export type DiscordStatus = {
+  configured: boolean;
+};
+
+export type WebhookCheck = {
+  name: string;
 };
 
 export type AppSettings = {

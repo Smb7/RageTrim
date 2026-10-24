@@ -4,6 +4,8 @@
   import {
     addFolder,
     errorText,
+    clearDiscordWebhook,
+    discordStatus,
     getSettings,
     listClips,
     listFolders,
@@ -11,19 +13,25 @@
     pickFolder,
     removeFolder,
     scanFolders,
+    saveDiscordWebhook,
     setEdited,
+    setPosted,
     setExportDir,
     setFfmpegPath,
     setViewed,
+    testDiscordWebhook,
   } from "$lib/api";
   import { clipLocation, formatBytes, formatWhen, scanStatus, shortPath } from "$lib/format";
-  import type { AppSettings, Clip, Folder, ScanSummary } from "$lib/types";
+  import type { AppSettings, Clip, DiscordStatus, Folder, ScanSummary } from "$lib/types";
 
   let folders = $state<Folder[]>([]);
   let clips = $state<Clip[]>([]);
   let selectedId = $state<number | null>(null);
   let trimmingId = $state<number | null>(null);
   let settings = $state<AppSettings | null>(null);
+  let discord = $state<DiscordStatus>({ configured: false });
+  let webhookUrl = $state("");
+  let webhookNote = $state("");
   let busy = $state(false);
   let error = $state("");
   let summary = $state<ScanSummary | null>(null);
@@ -43,6 +51,7 @@
       folders = await listFolders();
       clips = await listClips();
       settings = await getSettings();
+      discord = await discordStatus();
       if (selectedId != null && !clips.some((clip) => clip.id === selectedId)) {
         selectedId = null;
       }
@@ -128,10 +137,53 @@
     }
   }
 
+  async function saveWebhook() {
+    error = "";
+    webhookNote = "";
+    try {
+      discord = await saveDiscordWebhook(webhookUrl);
+      webhookUrl = "";
+      webhookNote = "Webhook saved in Windows Credential Manager.";
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function testWebhook() {
+    error = "";
+    webhookNote = "";
+    try {
+      const check = await testDiscordWebhook();
+      webhookNote = `Webhook OK: ${check.name}`;
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function clearWebhook() {
+    error = "";
+    webhookNote = "";
+    try {
+      discord = await clearDiscordWebhook();
+      webhookNote = "Webhook removed.";
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
   async function toggleEdited(clip: Clip) {
     error = "";
     try {
       replaceClip(await setEdited(clip.id, clip.editedAt == null));
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function togglePosted(clip: Clip) {
+    error = "";
+    try {
+      replaceClip(await setPosted(clip.id, clip.postedAt == null));
     } catch (err) {
       error = errorText(err);
     }
@@ -187,6 +239,31 @@
           <button class="ghost" type="button" disabled={busy} onclick={chooseExportDir}>Change folder</button>
           <p>{settings.ffmpegPath ? "FFmpeg found" : "FFmpeg missing"}</p>
           <button class="ghost" type="button" disabled={busy} onclick={locateFfmpeg}>Locate FFmpeg</button>
+        </div>
+        <div class="tool-box">
+          <h2>Discord</h2>
+          <p>{discord.configured ? "Webhook saved" : "No webhook"}</p>
+          <input
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="https://discord.com/api/webhooks/..."
+            bind:value={webhookUrl}
+          />
+          <div class="card-actions">
+            <button class="ghost" type="button" disabled={busy || webhookUrl.trim() === ""} onclick={saveWebhook}>
+              Save
+            </button>
+            <button class="ghost" type="button" disabled={busy || !discord.configured} onclick={testWebhook}>
+              Test
+            </button>
+            <button class="ghost danger" type="button" disabled={busy || !discord.configured} onclick={clearWebhook}>
+              Clear
+            </button>
+          </div>
+          {#if webhookNote}
+            <p>{webhookNote}</p>
+          {/if}
         </div>
       {/if}
     </aside>
@@ -252,6 +329,13 @@
                   onclick={() => toggleEdited(clip)}
                 >
                   {clip.editedAt == null ? "Mark edited" : "Edited"}
+                </button>
+                <button
+                  class="pill {clip.postedAt == null ? 'new' : 'viewed'}"
+                  type="button"
+                  onclick={() => togglePosted(clip)}
+                >
+                  {clip.postedAt == null ? "Mark posted" : "Posted"}
                 </button>
               </div>
             </li>

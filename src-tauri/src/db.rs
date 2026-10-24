@@ -148,7 +148,7 @@ impl Database {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.folder_id, f.path, c.path, c.file_name, c.size_bytes,
                     c.modified_ms, c.viewed_at, c.missing, c.duration_ms, c.width,
-                    c.height, c.video_codec, c.edited_at
+                    c.height, c.video_codec, c.edited_at, c.posted_at
              FROM clips c
              JOIN folders f ON f.id = c.folder_id
              ORDER BY c.missing ASC, c.modified_ms DESC, c.file_name COLLATE NOCASE ASC",
@@ -162,6 +162,33 @@ impl Database {
         let changed = self.conn.execute(
             "UPDATE clips SET viewed_at = ?1 WHERE id = ?2",
             params![viewed_at, id],
+        )?;
+        if changed == 0 {
+            return Err(Error::message("That clip is no longer in the library."));
+        }
+        self.clip_by_id(id)
+    }
+
+    pub fn latest_export(&self, clip_id: i64) -> Result<Option<(String, i64, i64)>, Error> {
+        match self.conn.query_row(
+            "SELECT path, in_ms, out_ms FROM exports
+             WHERE clip_id = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            params![clip_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ) {
+            Ok(export) => Ok(Some(export)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn set_posted(&self, id: i64, posted: bool) -> Result<Clip, Error> {
+        let posted_at = posted.then(now_ms);
+        let changed = self.conn.execute(
+            "UPDATE clips SET posted_at = ?1 WHERE id = ?2",
+            params![posted_at, id],
         )?;
         if changed == 0 {
             return Err(Error::message("That clip is no longer in the library."));
@@ -264,7 +291,7 @@ impl Database {
             .query_row(
                 "SELECT c.id, c.folder_id, f.path, c.path, c.file_name, c.size_bytes,
                         c.modified_ms, c.viewed_at, c.missing, c.duration_ms, c.width,
-                        c.height, c.video_codec, c.edited_at
+                        c.height, c.video_codec, c.edited_at, c.posted_at
                  FROM clips c
                  JOIN folders f ON f.id = c.folder_id
                  WHERE c.id = ?1",
@@ -303,6 +330,7 @@ fn map_clip(row: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
         height: row.get(11)?,
         video_codec: row.get(12)?,
         edited_at: row.get(13)?,
+        posted_at: row.get(14)?,
     })
 }
 
@@ -356,6 +384,10 @@ fn migrate(conn: &Connection) -> Result<(), Error> {
             ",
         )?;
         conn.pragma_update(None, "user_version", 2)?;
+    }
+    if version < 3 {
+        conn.execute("ALTER TABLE clips ADD COLUMN posted_at INTEGER", [])?;
+        conn.pragma_update(None, "user_version", 3)?;
     }
     Ok(())
 }
