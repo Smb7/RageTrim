@@ -13,6 +13,7 @@ Local Windows app for browsing recorder clips and marking what you have already 
 - Trim a clip with in and out points. Fast cut keeps the original quality and may snap to a keyframe. Discord compress re-encodes toward a size target, 19 MB by default.
 - Exports go to `Videos\RageTrim` unless you pick another folder. Originals are never overwritten. A successful export marks the clip edited.
 - FFmpeg must be on `PATH`, beside a path you choose, or in `%APPDATA%\RageTrim\ffmpeg`. Codecs the preview cannot play get a temporary low-resolution proxy.
+- Post the latest export to a Discord channel webhook. The URL is stored in Windows Credential Manager, not in the library database, and only `https://discord.com` webhook URLs are accepted.
 
 Drive roots are rejected. The scan skips hidden directories, `node_modules`, `AppData`, and other junk, and it stops after 10,000 videos in one folder.
 

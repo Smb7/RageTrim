@@ -1,6 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AppSettings, Clip, ExportResult, Folder, ScanSummary } from "./types";
+import type {
+  AppSettings,
+  Clip,
+  DiscordStatus,
+  ExportResult,
+  Folder,
+  ScanSummary,
+  WebhookCheck,
+} from "./types";
 
 export function listFolders(): Promise<Folder[]> {
   return invoke("list_folders");
@@ -28,6 +36,30 @@ export function setViewed(id: number, viewed: boolean): Promise<Clip> {
 
 export function setEdited(id: number, edited: boolean): Promise<Clip> {
   return invoke("set_edited", { id, edited });
+}
+
+export function setPosted(id: number, posted: boolean): Promise<Clip> {
+  return invoke("set_posted", { id, posted });
+}
+
+export function discordStatus(): Promise<DiscordStatus> {
+  return invoke("discord_status");
+}
+
+export function saveDiscordWebhook(url: string): Promise<DiscordStatus> {
+  return invoke("save_discord_webhook", { url });
+}
+
+export function clearDiscordWebhook(): Promise<DiscordStatus> {
+  return invoke("clear_discord_webhook");
+}
+
+export function testDiscordWebhook(): Promise<WebhookCheck> {
+  return invoke("test_discord_webhook");
+}
+
+export function postClip(id: number, message: string): Promise<Clip> {
+  return invoke("post_clip", { id, message });
 }
 
 export function getSettings(): Promise<AppSettings> {

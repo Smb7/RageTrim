@@ -2,7 +2,7 @@
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
-  import { errorText, exportClip, makePreview, probeClip, setCompressTarget } from "$lib/api";
+  import { errorText, exportClip, makePreview, postClip, probeClip, setCompressTarget } from "$lib/api";
   import { formatDuration } from "$lib/format";
   import type { AppSettings, Clip } from "$lib/types";
 
@@ -39,6 +39,7 @@
   let error = $state("");
   let notice = $state("");
   let exportedPath = $state("");
+  let postMessage = $state("");
   let progress = $state(0);
   let loadedId = 0;
 
@@ -71,6 +72,7 @@
     error = "";
     notice = "";
     exportedPath = "";
+    postMessage = clip.fileName;
     progress = 0;
     void loadProbe(clip.id);
   });
@@ -154,6 +156,19 @@
     }
   }
 
+  async function postExport() {
+    error = "";
+    busy = "Posting…";
+    try {
+      onClip(await postClip(clip.id, postMessage));
+      notice = "Posted to Discord. The webhook URL stayed on this PC.";
+    } catch (err) {
+      error = errorText(err);
+    } finally {
+      busy = "";
+    }
+  }
+
   async function exportSelection() {
     error = "";
     exportedPath = "";
@@ -166,6 +181,7 @@
       notice = mode === "copy"
         ? "Fast cut saved. It may snap to the nearest keyframe."
         : "Discord compress saved. The original was not changed.";
+      postMessage = `${clip.fileName} ${formatDuration(inMs)}-${formatDuration(outMs)}`;
     } catch (err) {
       error = errorText(err);
     } finally {
@@ -265,6 +281,11 @@
     {/if}
     {#if exportedPath}
       <code title={exportedPath}>{exportedPath}</code>
+      <label>
+        Discord message
+        <textarea bind:value={postMessage} maxlength="2000" rows="3"></textarea>
+      </label>
+      <button class="primary" type="button" disabled={Boolean(busy)} onclick={postExport}>Post to Discord</button>
     {/if}
   </div>
 </div>
@@ -327,12 +348,18 @@
     width: 100%;
   }
 
-  select {
+  select,
+  textarea {
     border: 1px solid #3a3f4b;
     border-radius: 8px;
     background: #12141a;
     color: #f2efe9;
     padding: 6px 8px;
+  }
+
+  textarea {
+    resize: vertical;
+    font: inherit;
   }
 
   code {

@@ -24,6 +24,7 @@ pub struct Clip {
     pub height: Option<i64>,
     pub video_codec: Option<String>,
     pub edited_at: Option<i64>,
+    pub posted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

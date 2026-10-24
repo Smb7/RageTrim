@@ -372,6 +372,14 @@ button:disabled {
   white-space: nowrap;
 }
 
+.tool-box input {
+  width: 100%;
+  border: 1px solid #3a3f4b;
+  border-radius: 8px;
+  background: #12141a;
+  padding: 6px 8px;
+}
+
 @media (max-width: 800px) {
   .workspace {
     grid-template-columns: 1fr;
