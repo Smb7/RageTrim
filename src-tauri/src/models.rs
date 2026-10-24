@@ -19,6 +19,27 @@ pub struct Clip {
     pub modified_ms: i64,
     pub viewed_at: Option<i64>,
     pub missing: bool,
+    pub duration_ms: Option<i64>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub video_codec: Option<String>,
+    pub edited_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub export_dir: String,
+    pub compress_target_bytes: u64,
+    pub ffmpeg_path: Option<String>,
+    pub ffprobe_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+    pub path: String,
+    pub clip: Clip,
 }
 
 #[derive(Debug, Clone, Serialize)]

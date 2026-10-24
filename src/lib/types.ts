@@ -13,6 +13,23 @@ export type Clip = {
   modifiedMs: number;
   viewedAt: number | null;
   missing: boolean;
+  durationMs: number | null;
+  width: number | null;
+  height: number | null;
+  videoCodec: string | null;
+  editedAt: number | null;
+};
+
+export type AppSettings = {
+  exportDir: string;
+  compressTargetBytes: number;
+  ffmpegPath: string | null;
+  ffprobePath: string | null;
+};
+
+export type ExportResult = {
+  path: string;
+  clip: Clip;
 };
 
 export type ScanSummary = {
