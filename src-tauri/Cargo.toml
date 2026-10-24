@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,6 +22,9 @@ walkdir = "2"
 dunce = "1"
 thiserror = "2"
 dirs = "6"
+keyring = "4.2.0"
+reqwest = { version = "0.13.5", features = ["blocking", "multipart", "json"] }
+notify = "8.2.0"
 
 [profile.release]
 codegen-units = 1

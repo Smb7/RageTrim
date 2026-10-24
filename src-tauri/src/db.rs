@@ -74,26 +74,40 @@ impl Database {
         modified_ms: i64,
     ) -> Result<Upsert, Error> {
         let existing = self.conn.query_row(
-            "SELECT size_bytes, modified_ms, missing FROM clips WHERE path = ?1",
+            "SELECT size_bytes, modified_ms, missing, path
+             FROM clips
+             WHERE path = ?1 COLLATE NOCASE
+             LIMIT 1",
             params![path],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         );
         match existing {
-            Ok((size, modified, missing)) => {
-                let changed = size != size_bytes || modified != modified_ms || missing != 0;
+            Ok((size, modified, missing, stored_path)) => {
+                let changed = size != size_bytes
+                    || modified != modified_ms
+                    || missing != 0
+                    || stored_path != path;
                 if changed {
                     self.conn.execute(
                         "UPDATE clips
-                         SET folder_id = ?1, file_name = ?2, size_bytes = ?3,
-                             modified_ms = ?4, missing = 0
-                         WHERE path = ?5",
-                        params![folder_id, file_name, size_bytes, modified_ms, path],
+                         SET folder_id = ?1, path = ?2, file_name = ?3, size_bytes = ?4,
+                             modified_ms = ?5, missing = 0
+                         WHERE path = ?6",
+                        params![
+                            folder_id,
+                            path,
+                            file_name,
+                            size_bytes,
+                            modified_ms,
+                            stored_path
+                        ],
                     )?;
                     Ok(Upsert::Updated)
                 } else {
@@ -121,10 +135,11 @@ impl Database {
             .conn
             .prepare("SELECT path FROM clips WHERE folder_id = ?1 AND missing = 0")?;
         let present = stmt.query_map(params![folder_id], |row| row.get::<_, String>(0))?;
+        let seen_keys: HashSet<String> = seen.iter().map(|path| path_key(path)).collect();
         let mut missing = Vec::new();
         for path in present {
             let path = path?;
-            if !seen.contains(&path) {
+            if !seen_keys.contains(&path_key(&path)) {
                 missing.push(path);
             }
         }
@@ -144,10 +159,19 @@ impl Database {
         Ok(missing.len() as u32)
     }
 
+    pub fn mark_folder_missing(&self, folder_id: i64) -> Result<u32, Error> {
+        let changed = self.conn.execute(
+            "UPDATE clips SET missing = 1 WHERE folder_id = ?1 AND missing = 0",
+            params![folder_id],
+        )?;
+        Ok(changed as u32)
+    }
+
     pub fn list_clips(&self) -> Result<Vec<Clip>, Error> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.folder_id, f.path, c.path, c.file_name, c.size_bytes,
-                    c.modified_ms, c.viewed_at, c.missing
+                    c.modified_ms, c.viewed_at, c.missing, c.duration_ms, c.width,
+                    c.height, c.video_codec, c.edited_at, c.posted_at
              FROM clips c
              JOIN folders f ON f.id = c.folder_id
              ORDER BY c.missing ASC, c.modified_ms DESC, c.file_name COLLATE NOCASE ASC",
@@ -168,11 +192,129 @@ impl Database {
         self.clip_by_id(id)
     }
 
-    fn clip_by_id(&self, id: i64) -> Result<Clip, Error> {
+    pub fn latest_export(&self, clip_id: i64) -> Result<Option<(String, i64, i64)>, Error> {
+        match self.conn.query_row(
+            "SELECT path, in_ms, out_ms FROM exports
+             WHERE clip_id = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            params![clip_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ) {
+            Ok(export) => Ok(Some(export)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn set_posted(&self, id: i64, posted: bool) -> Result<Clip, Error> {
+        let posted_at = posted.then(now_ms);
+        let changed = self.conn.execute(
+            "UPDATE clips SET posted_at = ?1 WHERE id = ?2",
+            params![posted_at, id],
+        )?;
+        if changed == 0 {
+            return Err(Error::message("That clip is no longer in the library."));
+        }
+        self.clip_by_id(id)
+    }
+
+    pub fn set_edited(&self, id: i64, edited: bool) -> Result<Clip, Error> {
+        let edited_at = edited.then(now_ms);
+        let changed = self.conn.execute(
+            "UPDATE clips SET edited_at = ?1 WHERE id = ?2",
+            params![edited_at, id],
+        )?;
+        if changed == 0 {
+            return Err(Error::message("That clip is no longer in the library."));
+        }
+        self.clip_by_id(id)
+    }
+
+    pub fn save_probe(
+        &self,
+        id: i64,
+        duration_ms: Option<i64>,
+        width: Option<i64>,
+        height: Option<i64>,
+        video_codec: Option<&str>,
+    ) -> Result<Clip, Error> {
+        let changed = self.conn.execute(
+            "UPDATE clips
+             SET duration_ms = ?1, width = ?2, height = ?3, video_codec = ?4
+             WHERE id = ?5",
+            params![duration_ms, width, height, video_codec, id],
+        )?;
+        if changed == 0 {
+            return Err(Error::message("That clip is no longer in the library."));
+        }
+        self.clip_by_id(id)
+    }
+
+    pub fn record_export(
+        &self,
+        clip_id: i64,
+        path: &str,
+        in_ms: i64,
+        out_ms: i64,
+        mode: &str,
+    ) -> Result<Clip, Error> {
+        let now = now_ms();
+        self.conn.execute(
+            "INSERT INTO exports (clip_id, path, in_ms, out_ms, mode, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![clip_id, path, in_ms, out_ms, mode, now],
+        )?;
+        self.conn.execute(
+            "UPDATE clips SET edited_at = ?1 WHERE id = ?2",
+            params![now, clip_id],
+        )?;
+        self.clip_by_id(clip_id)
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, Error> {
+        match self.conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |row| row.get(0),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), Error> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn export_dir(&self) -> Result<PathBuf, Error> {
+        if let Some(path) = self.get_setting("export_dir")? {
+            return Ok(PathBuf::from(path));
+        }
+        default_export_dir()
+    }
+
+    pub fn compress_target_bytes(&self) -> Result<u64, Error> {
+        let Some(value) = self.get_setting("compress_target_bytes")? else {
+            return Ok(crate::ffmpeg::DEFAULT_TARGET_BYTES);
+        };
+        value
+            .parse()
+            .map_err(|_| Error::message("The compress target is invalid."))
+    }
+
+    pub fn clip_by_id(&self, id: i64) -> Result<Clip, Error> {
         self.conn
             .query_row(
                 "SELECT c.id, c.folder_id, f.path, c.path, c.file_name, c.size_bytes,
-                        c.modified_ms, c.viewed_at, c.missing
+                        c.modified_ms, c.viewed_at, c.missing, c.duration_ms, c.width,
+                        c.height, c.video_codec, c.edited_at, c.posted_at
                  FROM clips c
                  JOIN folders f ON f.id = c.folder_id
                  WHERE c.id = ?1",
@@ -195,6 +337,10 @@ pub enum Upsert {
     Unchanged,
 }
 
+fn path_key(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
+}
+
 fn map_clip(row: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
     Ok(Clip {
         id: row.get(0)?,
@@ -206,6 +352,12 @@ fn map_clip(row: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
         modified_ms: row.get(6)?,
         viewed_at: row.get(7)?,
         missing: row.get::<_, i64>(8)? != 0,
+        duration_ms: row.get(9)?,
+        width: row.get(10)?,
+        height: row.get(11)?,
+        video_codec: row.get(12)?,
+        edited_at: row.get(13)?,
+        posted_at: row.get(14)?,
     })
 }
 
@@ -235,7 +387,43 @@ fn migrate(conn: &Connection) -> Result<(), Error> {
         )?;
         conn.pragma_update(None, "user_version", 1)?;
     }
+    if version < 2 {
+        conn.execute_batch(
+            "
+            ALTER TABLE clips ADD COLUMN duration_ms INTEGER;
+            ALTER TABLE clips ADD COLUMN width INTEGER;
+            ALTER TABLE clips ADD COLUMN height INTEGER;
+            ALTER TABLE clips ADD COLUMN video_codec TEXT;
+            ALTER TABLE clips ADD COLUMN edited_at INTEGER;
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE exports (
+                id INTEGER PRIMARY KEY,
+                clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                in_ms INTEGER NOT NULL,
+                out_ms INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            ",
+        )?;
+        conn.pragma_update(None, "user_version", 2)?;
+    }
+    if version < 3 {
+        conn.execute("ALTER TABLE clips ADD COLUMN posted_at INTEGER", [])?;
+        conn.pragma_update(None, "user_version", 3)?;
+    }
     Ok(())
+}
+
+pub fn default_export_dir() -> Result<PathBuf, Error> {
+    if let Some(videos) = dirs::video_dir() {
+        return Ok(videos.join("RageTrim"));
+    }
+    Ok(app_data_dir()?.join("exports"))
 }
 
 pub fn now_ms() -> i64 {
@@ -287,6 +475,33 @@ mod tests {
 
         db.remove_folder(folder.id).unwrap();
         assert!(db.list_clips().unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn case_only_path_change_keeps_the_viewed_mark() {
+        let (db, dir) = temp_db();
+        let folder = db.add_folder(r"C:\Clips").unwrap();
+        db.upsert_clip(folder.id, r"C:\Clips\Loss.mp4", "Loss.mp4", 12, 99)
+            .unwrap();
+        let clip = db.list_clips().unwrap().pop().unwrap();
+        db.set_viewed(clip.id, true).unwrap();
+
+        let again = db
+            .upsert_clip(folder.id, r"C:\Clips\loss.mp4", "loss.mp4", 18, 100)
+            .unwrap();
+        assert_eq!(again, Upsert::Updated);
+        let clips = db.list_clips().unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].path, r"C:\Clips\loss.mp4");
+        assert!(clips[0].viewed_at.is_some());
+        assert!(!clips[0].missing);
+
+        let mut seen = HashSet::new();
+        seen.insert(r"c:\clips\loss.mp4".to_string());
+        assert_eq!(db.mark_missing_unseen(folder.id, &seen).unwrap(), 0);
+
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }

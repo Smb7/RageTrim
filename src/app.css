@@ -185,6 +185,18 @@ button:disabled {
   font-size: 13px;
 }
 
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 20px 8px;
+}
+
+.filters .ghost.active {
+  border-color: #d64545;
+  color: #ffd2d2;
+}
+
 .banner,
 .warnings {
   margin: 0 20px 8px;
@@ -260,6 +272,7 @@ button:disabled {
 
 .card-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 8px;
@@ -340,6 +353,43 @@ button:disabled {
   display: block;
   margin-bottom: 2px;
   font-size: 13px;
+}
+
+.tool-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid #2a2d34;
+}
+
+.tool-box h2,
+.tool-box p {
+  margin: 0;
+}
+
+.tool-box h2 {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #a39e94;
+}
+
+.tool-box p {
+  overflow: hidden;
+  color: #f2efe9;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-box input {
+  width: 100%;
+  border: 1px solid #3a3f4b;
+  border-radius: 8px;
+  background: #12141a;
+  padding: 6px 8px;
 }
 
 @media (max-width: 800px) {

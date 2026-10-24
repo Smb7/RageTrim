@@ -1,38 +1,88 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+  import Player from "$lib/components/Player.svelte";
+  import Thumb from "$lib/components/Thumb.svelte";
   import {
     addFolder,
     errorText,
+    clearDiscordWebhook,
+    discordStatus,
+    getSettings,
     listClips,
     listFolders,
+    pickFfmpeg,
     pickFolder,
     removeFolder,
     scanFolders,
+    saveDiscordWebhook,
+    setEdited,
+    setPosted,
+    setExportDir,
+    setFfmpegPath,
     setViewed,
+    testDiscordWebhook,
   } from "$lib/api";
   import { clipLocation, formatBytes, formatWhen, scanStatus, shortPath } from "$lib/format";
-  import type { Clip, Folder, ScanSummary } from "$lib/types";
+  import type { AppSettings, Clip, DiscordStatus, Folder, ScanSummary } from "$lib/types";
 
   let folders = $state<Folder[]>([]);
   let clips = $state<Clip[]>([]);
   let selectedId = $state<number | null>(null);
+  let trimmingId = $state<number | null>(null);
+  let settings = $state<AppSettings | null>(null);
+  let discord = $state<DiscordStatus>({ configured: false });
+  let webhookUrl = $state("");
+  let webhookNote = $state("");
   let busy = $state(false);
   let error = $state("");
   let summary = $state<ScanSummary | null>(null);
+  const filters = ["all", "new", "viewed", "edited", "posted"] as const;
+  let filter = $state<(typeof filters)[number]>("all");
 
   let selected = $derived(clips.find((clip) => clip.id === selectedId) ?? null);
+  let trimming = $derived(clips.find((clip) => clip.id === trimmingId) ?? null);
   let visibleCount = $derived(clips.filter((clip) => !clip.missing).length);
-  let newCount = $derived(clips.filter((clip) => !clip.missing && clip.viewedAt == null).length);
+  const filterLabels: Record<(typeof filters)[number], string> = {
+    all: "All",
+    new: "New",
+    viewed: "Viewed",
+    edited: "Edited",
+    posted: "Posted",
+  };
+
+  function isNew(clip: Clip): boolean {
+    return !clip.missing && clip.viewedAt == null && clip.editedAt == null && clip.postedAt == null;
+  }
+
+  let shown = $derived(
+    clips.filter((clip) => {
+      if (filter === "new") return isNew(clip);
+      if (filter === "viewed") return clip.viewedAt != null;
+      if (filter === "edited") return clip.editedAt != null;
+      if (filter === "posted") return clip.postedAt != null;
+      return true;
+    }),
+  );
+  let newCount = $derived(clips.filter(isNew).length);
 
   onMount(() => {
     void refresh();
+    const unlisten = listen("library-changed", () => {
+      void refresh(true);
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
   });
 
-  async function refresh() {
-    error = "";
+  async function refresh(quiet = false) {
+    if (!quiet) error = "";
     try {
       folders = await listFolders();
       clips = await listClips();
+      settings = await getSettings();
+      discord = await discordStatus();
       if (selectedId != null && !clips.some((clip) => clip.id === selectedId)) {
         selectedId = null;
       }
@@ -82,11 +132,89 @@
     }
   }
 
+  async function chooseExportDir() {
+    error = "";
+    try {
+      const path = await pickFolder("Choose an export folder");
+      if (!path) return;
+      settings = await setExportDir(path);
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function locateFfmpeg() {
+    error = "";
+    try {
+      const path = await pickFfmpeg();
+      if (!path) return;
+      settings = await setFfmpegPath(path);
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  function replaceClip(updated: Clip) {
+    clips = clips.map((item) => (item.id === updated.id ? updated : item));
+  }
+
   async function toggleViewed(clip: Clip) {
     error = "";
     try {
       const updated = await setViewed(clip.id, clip.viewedAt == null);
-      clips = clips.map((item) => (item.id === updated.id ? updated : item));
+      replaceClip(updated);
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function saveWebhook() {
+    error = "";
+    webhookNote = "";
+    try {
+      discord = await saveDiscordWebhook(webhookUrl);
+      webhookUrl = "";
+      webhookNote = "Webhook saved in Windows Credential Manager.";
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function testWebhook() {
+    error = "";
+    webhookNote = "";
+    try {
+      const check = await testDiscordWebhook();
+      webhookNote = `Webhook OK: ${check.name}`;
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function clearWebhook() {
+    error = "";
+    webhookNote = "";
+    try {
+      discord = await clearDiscordWebhook();
+      webhookNote = "Webhook removed.";
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function toggleEdited(clip: Clip) {
+    error = "";
+    try {
+      replaceClip(await setEdited(clip.id, clip.editedAt == null));
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function togglePosted(clip: Clip) {
+    error = "";
+    try {
+      replaceClip(await setPosted(clip.id, clip.postedAt == null));
     } catch (err) {
       error = errorText(err);
     }
@@ -135,12 +263,53 @@
           {/each}
         </ul>
       {/if}
+      {#if settings}
+        <div class="tool-box">
+          <h2>Export</h2>
+          <p title={settings.exportDir}>{shortPath(settings.exportDir)}</p>
+          <button class="ghost" type="button" disabled={busy} onclick={chooseExportDir}>Change folder</button>
+          <p>{settings.ffmpegPath ? "FFmpeg found" : "FFmpeg missing"}</p>
+          <button class="ghost" type="button" disabled={busy} onclick={locateFfmpeg}>Locate FFmpeg</button>
+        </div>
+        <div class="tool-box">
+          <h2>Discord</h2>
+          <p>{discord.configured ? "Webhook saved" : "No webhook"}</p>
+          <input
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="https://discord.com/api/webhooks/..."
+            bind:value={webhookUrl}
+          />
+          <div class="card-actions">
+            <button class="ghost" type="button" disabled={busy || webhookUrl.trim() === ""} onclick={saveWebhook}>
+              Save
+            </button>
+            <button class="ghost" type="button" disabled={busy || !discord.configured} onclick={testWebhook}>
+              Test
+            </button>
+            <button class="ghost danger" type="button" disabled={busy || !discord.configured} onclick={clearWebhook}>
+              Clear
+            </button>
+          </div>
+          {#if webhookNote}
+            <p>{webhookNote}</p>
+          {/if}
+        </div>
+      {/if}
     </aside>
 
     <section class="library">
       <div class="library-head">
         <h2>Clips</h2>
         <p>{visibleCount} on disk · {newCount} new</p>
+      </div>
+      <div class="filters">
+        {#each filters as name (name)}
+          <button class="ghost" class:active={filter === name} type="button" onclick={() => (filter = name)}>
+            {filterLabels[name]}
+          </button>
+        {/each}
       </div>
 
       {#if error}
@@ -155,7 +324,15 @@
         </div>
       {/if}
 
-      {#if folders.length === 0}
+      {#if trimming && settings}
+        <Player
+          clip={trimming}
+          {settings}
+          onBack={() => (trimmingId = null)}
+          onClip={replaceClip}
+          onSettings={(next) => (settings = next)}
+        />
+      {:else if folders.length === 0}
         <div class="empty">
           <strong>No folders yet</strong>
           Add a clip folder to start the library.
@@ -165,11 +342,19 @@
           <strong>No clips in the library</strong>
           Scan after a match, or pick a folder that already has videos.
         </div>
+      {:else if shown.length === 0}
+        <div class="empty">
+          <strong>Nothing in this filter</strong>
+          Try another filter, or scan again.
+        </div>
       {:else}
         <ul class="clip-grid">
-          {#each clips as clip (clip.id)}
+          {#each shown as clip (clip.id)}
             <li class:selected={clip.id === selectedId} class:missing={clip.missing} class="card">
               <button class="card-select" type="button" onclick={() => (selectedId = clip.id)}>
+                {#key `${clip.id}-${clip.modifiedMs}`}
+                  <Thumb {clip} />
+                {/key}
                 <h3 title={clip.fileName}>{clip.fileName}</h3>
                 <p>
                   {clip.missing ? "Missing · " : ""}{formatBytes(clip.sizeBytes)} · {formatWhen(clip.modifiedMs)}
@@ -184,21 +369,40 @@
                 >
                   {clip.viewedAt == null ? "Mark viewed" : "Viewed"}
                 </button>
+                <button
+                  class="pill {clip.editedAt == null ? 'new' : 'viewed'}"
+                  type="button"
+                  onclick={() => toggleEdited(clip)}
+                >
+                  {clip.editedAt == null ? "Mark edited" : "Edited"}
+                </button>
+                <button
+                  class="pill {clip.postedAt == null ? 'new' : 'viewed'}"
+                  type="button"
+                  onclick={() => togglePosted(clip)}
+                >
+                  {clip.postedAt == null ? "Mark posted" : "Posted"}
+                </button>
               </div>
             </li>
           {/each}
         </ul>
       {/if}
 
-      {#if selected}
+      {#if selected && !trimming}
         <div class="detail">
           <div>
             <strong>{selected.fileName}</strong>
             <code title={selected.path}>{selected.path}</code>
           </div>
-          <button class="ghost" type="button" onclick={() => toggleViewed(selected)}>
-            {selected.viewedAt == null ? "Mark viewed" : "Mark as new"}
-          </button>
+          <div class="card-actions">
+            <button class="ghost" type="button" onclick={() => toggleViewed(selected)}>
+              {selected.viewedAt == null ? "Mark viewed" : "Mark as new"}
+            </button>
+            <button class="primary" type="button" disabled={selected.missing} onclick={() => (trimmingId = selected.id)}>
+              Trim
+            </button>
+          </div>
         </div>
       {/if}
     </section>
