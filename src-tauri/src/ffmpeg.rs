@@ -193,6 +193,47 @@ pub fn export_args(
     args
 }
 
+pub fn thumbnail_args(input: &Path, output: &Path, start: &str) -> Vec<OsString> {
+    vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-y"),
+        OsString::from("-ss"),
+        OsString::from(start),
+        OsString::from("-i"),
+        input.as_os_str().to_os_string(),
+        OsString::from("-frames:v"),
+        OsString::from("1"),
+        OsString::from("-vf"),
+        OsString::from("scale=320:-1"),
+        output.as_os_str().to_os_string(),
+    ]
+}
+
+pub fn run_quiet(tool: &Path, args: &[OsString]) -> Result<(), Error> {
+    if !tool.is_file() {
+        return Err(Error::message("FFmpeg was not found."));
+    }
+    let mut command = Command::new(tool);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let status = command
+        .status()
+        .map_err(|_| Error::message("Couldn't start FFmpeg."))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::message("FFmpeg could not make a thumbnail."))
+    }
+}
+
 pub fn preview_args(input: &Path, output: &Path) -> Vec<OsString> {
     vec![
         OsString::from("-hide_banner"),

@@ -14,6 +14,8 @@ Local Windows app for browsing recorder clips and marking what you have already 
 - Exports go to `Videos\RageTrim` unless you pick another folder. Originals are never overwritten. A successful export marks the clip edited.
 - FFmpeg must be on `PATH`, beside a path you choose, or in `%APPDATA%\RageTrim\ffmpeg`. Codecs the preview cannot play get a temporary low-resolution proxy.
 - Post the latest export to a Discord channel webhook. The URL is stored in Windows Credential Manager, not in the library database, and only `https://discord.com` webhook URLs are accepted.
+- Filter the library by new, viewed, edited, or posted. New files in a watched folder show up after a short delay. Thumbnails are cached under app data.
+- `npm run tauri build` makes an NSIS installer. It embeds the WebView2 bootstrapper and installs the runtime if Windows does not already have it.
 
 Drive roots are rejected. The scan skips hidden directories, `node_modules`, `AppData`, and other junk, and it stops after 10,000 videos in one folder.
 

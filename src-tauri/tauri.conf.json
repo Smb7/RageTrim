@@ -30,7 +30,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      }
+    },
     "publisher": "SufferApps",
     "shortDescription": "Browse clips and mark what you have watched.",
     "longDescription": "RageTrim is a local desktop library for game clips. Original files stay where they are.",

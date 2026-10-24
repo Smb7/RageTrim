@@ -4,6 +4,7 @@ mod error;
 mod ffmpeg;
 mod models;
 mod scan;
+mod watch;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,14 +16,16 @@ use crate::db::{Database, app_data_dir};
 use crate::error::Error;
 use crate::ffmpeg::{
     ExportMode, export_args, export_file_name, find_tool, is_ffmpeg_binary, preview_args,
-    probe_file, run_tool, validate_range,
+    probe_file, run_quiet, run_tool, thumbnail_args, validate_range,
 };
 use crate::models::{AppSettings, Clip, ExportResult, Folder, ScanSummary};
 use crate::scan::{nested_conflict, normalize_folder, scan_all};
 
-struct AppState {
-    db: Mutex<Database>,
+pub struct AppState {
+    pub db: Mutex<Database>,
     busy: Arc<AtomicBool>,
+    thumbs: Mutex<()>,
+    watcher: Mutex<Option<notify::RecommendedWatcher>>,
 }
 
 struct BusyGuard(Arc<AtomicBool>);
@@ -43,26 +46,96 @@ fn list_folders(state: State<AppState>) -> Result<Vec<Folder>, Error> {
 fn add_folder(app: AppHandle, state: State<AppState>, path: String) -> Result<Folder, Error> {
     let canonical = normalize_folder(Path::new(&path))?;
     allow_asset_dir(&app, &canonical)?;
-    let db = lock_db(&state)?;
-    let existing = db.list_folders()?;
-    if let Some(conflict) = nested_conflict(&existing, &canonical) {
-        return Err(Error::message(format!(
-            "That folder overlaps {conflict}. Watch one of them, not both."
-        )));
+    let folder = {
+        let db = lock_db(&state)?;
+        let existing = db.list_folders()?;
+        if let Some(conflict) = nested_conflict(&existing, &canonical) {
+            return Err(Error::message(format!(
+                "That folder overlaps {conflict}. Watch one of them, not both."
+            )));
+        }
+        db.add_folder(&canonical.to_string_lossy())?
+    };
+    if let Ok(mut watcher) = state.watcher.lock() {
+        if let Some(watcher) = watcher.as_mut() {
+            watch::watch_folder(watcher, &canonical);
+        }
     }
-    db.add_folder(&canonical.to_string_lossy())
+    Ok(folder)
 }
 
 #[tauri::command]
 fn remove_folder(state: State<AppState>, id: i64) -> Result<(), Error> {
-    let db = lock_db(&state)?;
-    db.remove_folder(id)
+    let removed = {
+        let db = lock_db(&state)?;
+        let path = db
+            .list_folders()?
+            .into_iter()
+            .find(|folder| folder.id == id)
+            .map(|folder| folder.path);
+        db.remove_folder(id)?;
+        path
+    };
+    if let Some(path) = removed {
+        if let Ok(mut watcher) = state.watcher.lock() {
+            if let Some(watcher) = watcher.as_mut() {
+                watch::unwatch_folder(watcher, Path::new(&path));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn scan_folders(state: State<AppState>) -> Result<ScanSummary, Error> {
     let db = lock_db(&state)?;
     scan_all(&db)
+}
+
+#[tauri::command]
+fn ensure_thumbnail(state: State<AppState>, id: i64) -> Result<Option<String>, Error> {
+    let _thumb = state
+        .thumbs
+        .lock()
+        .map_err(|_| Error::message("Couldn't make a thumbnail."))?;
+    let clip = {
+        let db = lock_db(&state)?;
+        db.clip_by_id(id)?
+    };
+    if clip.missing {
+        return Ok(None);
+    }
+    let dir = app_data_dir()?.join("thumbs");
+    std::fs::create_dir_all(&dir)?;
+    let output = dir.join(format!("{}-{}.jpg", clip.id, clip.modified_ms));
+    if output.is_file()
+        && std::fs::metadata(&output)
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+            > 0
+    {
+        return Ok(Some(output.to_string_lossy().into_owned()));
+    }
+    let db = lock_db(&state)?;
+    let Some(ffmpeg) = find_tool(
+        "ffmpeg",
+        db.get_setting("ffmpeg_path")?.as_deref().map(Path::new),
+    ) else {
+        return Ok(None);
+    };
+    drop(db);
+    let input = PathBuf::from(&clip.path);
+    assert_safe_path(&input)?;
+    let first = thumbnail_args(&input, &output, "1");
+    if run_quiet(&ffmpeg, &first).is_err() {
+        let _ = std::fs::remove_file(&output);
+        let retry = thumbnail_args(&input, &output, "0");
+        if run_quiet(&ffmpeg, &retry).is_err() {
+            let _ = std::fs::remove_file(&output);
+            return Ok(None);
+        }
+    }
+    Ok(Some(output.to_string_lossy().into_owned()))
 }
 
 #[tauri::command]
@@ -402,7 +475,17 @@ pub fn run() {
             app.manage(AppState {
                 db: Mutex::new(db),
                 busy: Arc::new(AtomicBool::new(false)),
+                thumbs: Mutex::new(()),
+                watcher: Mutex::new(None),
             });
+            let handle = app.handle().clone();
+            if let Ok(watcher) = watch::start(handle) {
+                app.state::<AppState>()
+                    .watcher
+                    .lock()
+                    .map_err(|err| std::io::Error::other(err.to_string()))?
+                    .replace(watcher);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -411,6 +494,7 @@ pub fn run() {
             remove_folder,
             scan_folders,
             list_clips,
+            ensure_thumbnail,
             set_viewed,
             set_edited,
             set_posted,

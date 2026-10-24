@@ -185,6 +185,18 @@ button:disabled {
   font-size: 13px;
 }
 
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 20px 8px;
+}
+
+.filters .ghost.active {
+  border-color: #d64545;
+  color: #ffd2d2;
+}
+
 .banner,
 .warnings {
   margin: 0 20px 8px;
