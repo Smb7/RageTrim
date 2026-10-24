@@ -19,7 +19,7 @@ use crate::ffmpeg::{
     probe_file, run_quiet, run_tool, thumbnail_args, validate_range,
 };
 use crate::models::{AppSettings, Clip, ExportResult, Folder, ScanSummary};
-use crate::scan::{nested_conflict, normalize_folder, scan_all};
+use crate::scan::{contained_file, nested_conflict, normalize_folder, paths_overlap, scan_all};
 
 pub struct AppState {
     pub db: Mutex<Database>,
@@ -53,6 +53,12 @@ fn add_folder(app: AppHandle, state: State<AppState>, path: String) -> Result<Fo
             return Err(Error::message(format!(
                 "That folder overlaps {conflict}. Watch one of them, not both."
             )));
+        }
+        let export_dir = db.export_dir()?;
+        if paths_overlap(&export_dir, &canonical) {
+            return Err(Error::message(
+                "That folder overlaps the export folder. Pick a different one so exports are not indexed as clips.",
+            ));
         }
         db.add_folder(&canonical.to_string_lossy())?
     };
@@ -124,8 +130,12 @@ fn ensure_thumbnail(state: State<AppState>, id: i64) -> Result<Option<String>, E
         return Ok(None);
     };
     drop(db);
-    let input = PathBuf::from(&clip.path);
-    assert_safe_path(&input)?;
+    let Ok(input) = contained_file(Path::new(&clip.folder_path), Path::new(&clip.path)) else {
+        return Ok(None);
+    };
+    if assert_safe_path(&input).is_err() {
+        return Ok(None);
+    }
     let first = thumbnail_args(&input, &output, "1");
     if run_quiet(&ffmpeg, &first).is_err() {
         let _ = std::fs::remove_file(&output);
@@ -198,11 +208,11 @@ fn post_clip(state: State<AppState>, id: i64, message: String) -> Result<Clip, E
         };
         let export_dir = db.export_dir()?;
         let path = PathBuf::from(path);
-        if !export_is_inside(&export_dir, &path) {
-            return Err(Error::message("That export is outside the export folder."));
-        }
         if !path.is_file() {
             return Err(Error::message("That export is missing. Trim it again."));
+        }
+        if contained_file(&export_dir, &path).is_err() {
+            return Err(Error::message("That export is outside the export folder."));
         }
         let file_name = path
             .file_name()
@@ -214,16 +224,6 @@ fn post_clip(state: State<AppState>, id: i64, message: String) -> Result<Clip, E
     discord::post_file(&path, &file_name, &message)?;
     let db = lock_db(&state)?;
     db.set_posted(id, true)
-}
-
-fn export_is_inside(root: &Path, candidate: &Path) -> bool {
-    let Ok(root) = dunce::canonicalize(root) else {
-        return false;
-    };
-    let Ok(candidate) = dunce::canonicalize(candidate) else {
-        return false;
-    };
-    candidate.starts_with(root)
 }
 
 #[tauri::command]
@@ -242,6 +242,15 @@ fn set_export_dir(
     std::fs::create_dir_all(&canonical)?;
     allow_asset_dir(&app, &canonical)?;
     let db = lock_db(&state)?;
+    if db
+        .list_folders()?
+        .iter()
+        .any(|folder| paths_overlap(Path::new(&folder.path), &canonical))
+    {
+        return Err(Error::message(
+            "That export folder overlaps a watched clip folder. Pick a different one so exports are not scanned as clips.",
+        ));
+    }
     db.set_setting("export_dir", &canonical.to_string_lossy())?;
     settings_from(&db)
 }
@@ -274,17 +283,13 @@ fn set_ffmpeg_path(state: State<AppState>, path: String) -> Result<AppSettings, 
 
 #[tauri::command]
 fn probe_clip(state: State<AppState>, id: i64) -> Result<Clip, Error> {
-    let _job = begin_job(&state)?;
     let (input, ffprobe) = {
         let db = lock_db(&state)?;
         let clip = db.clip_by_id(id)?;
-        if clip.missing {
-            return Err(Error::message("That clip is missing."));
-        }
+        let input = clip_source(&clip)?;
         let ffprobe = required_tool(&db, "ffprobe")?;
-        (PathBuf::from(clip.path), ffprobe)
+        (input, ffprobe)
     };
-    assert_safe_path(&input)?;
     let probe = probe_file(&ffprobe, &input)?;
     let db = lock_db(&state)?;
     db.save_probe(
@@ -302,19 +307,12 @@ fn make_preview(app: AppHandle, state: State<AppState>, id: i64) -> Result<Strin
     let (input, ffmpeg, output, duration_ms) = {
         let db = lock_db(&state)?;
         let clip = db.clip_by_id(id)?;
-        if clip.missing {
-            return Err(Error::message("That clip is missing."));
-        }
+        let input = clip_source(&clip)?;
         let ffmpeg = required_tool(&db, "ffmpeg")?;
         let dir = app_data_dir()?.join("proxies");
         std::fs::create_dir_all(&dir)?;
         let output = dir.join(format!("{}-{}.mp4", clip.id, clip.modified_ms));
-        (
-            PathBuf::from(clip.path),
-            ffmpeg,
-            output,
-            clip.duration_ms.unwrap_or(0),
-        )
+        (input, ffmpeg, output, clip.duration_ms.unwrap_or(0))
     };
     if output.is_file()
         && std::fs::metadata(&output)
@@ -324,7 +322,7 @@ fn make_preview(app: AppHandle, state: State<AppState>, id: i64) -> Result<Strin
     {
         return Ok(output.to_string_lossy().into_owned());
     }
-    assert_safe_path(&input)?;
+    assert_safe_path(&output)?;
     let args = preview_args(&input, &output);
     if let Err(err) = run_tool(&app, &ffmpeg, &args, id, "preview", duration_ms) {
         let _ = std::fs::remove_file(&output);
@@ -344,12 +342,10 @@ fn export_clip(
 ) -> Result<ExportResult, Error> {
     let _job = begin_job(&state)?;
     let mode = ExportMode::parse(&mode)?;
-    let (input, ffmpeg, output, target, height, duration_ms) = {
+    let (input, ffmpeg, output, target, height) = {
         let db = lock_db(&state)?;
         let clip = db.clip_by_id(id)?;
-        if clip.missing {
-            return Err(Error::message("That clip is missing."));
-        }
+        let input = clip_source(&clip)?;
         validate_range(in_ms, out_ms, clip.duration_ms)?;
         let ffmpeg = required_tool(&db, "ffmpeg")?;
         let export_dir = db.export_dir()?;
@@ -358,15 +354,13 @@ fn export_clip(
         let file_name = export_file_name(&clip.file_name, in_ms, out_ms, mode);
         let output = unique_output(&export_dir, &file_name);
         (
-            PathBuf::from(clip.path),
+            input,
             ffmpeg,
             output,
             db.compress_target_bytes()?,
             clip.height,
-            clip.duration_ms.unwrap_or(out_ms - in_ms),
         )
     };
-    assert_safe_path(&input)?;
     assert_safe_path(&output)?;
     let args = export_args(&input, &output, in_ms, out_ms, mode, target, height);
     if let Err(err) = run_tool(
@@ -375,7 +369,7 @@ fn export_clip(
         &args,
         id,
         "export",
-        duration_ms.max(out_ms - in_ms),
+        out_ms.saturating_sub(in_ms),
     ) {
         let _ = std::fs::remove_file(&output);
         return Err(err);
@@ -421,6 +415,15 @@ fn allow_asset_dir(app: &AppHandle, path: &Path) -> Result<(), Error> {
         .map_err(|_| Error::message("Couldn't open that folder for preview."))
 }
 
+fn clip_source(clip: &crate::models::Clip) -> Result<PathBuf, Error> {
+    if clip.missing {
+        return Err(Error::message("That clip is missing."));
+    }
+    let input = contained_file(Path::new(&clip.folder_path), Path::new(&clip.path))?;
+    assert_safe_path(&input)?;
+    Ok(input)
+}
+
 fn assert_safe_path(path: &Path) -> Result<(), Error> {
     let text = path.to_string_lossy();
     if text.starts_with('-') || text.contains('\0') {
@@ -434,17 +437,22 @@ fn unique_output(dir: &Path, file_name: &str) -> PathBuf {
     if !candidate.exists() {
         return candidate;
     }
-    let stem = Path::new(file_name)
+    let path = Path::new(file_name);
+    let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or("clip");
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("mp4");
     for index in 2..1000 {
-        let next = dir.join(format!("{stem}-{index}.mp4"));
+        let next = dir.join(format!("{stem}-{index}.{ext}"));
         if !next.exists() {
             return next;
         }
     }
-    dir.join(format!("{stem}-{}.mp4", crate::db::now_ms()))
+    dir.join(format!("{stem}-{}.{ext}", crate::db::now_ms()))
 }
 
 fn lock_db<'a>(

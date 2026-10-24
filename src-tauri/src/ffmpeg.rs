@@ -99,11 +99,26 @@ pub fn output_height(source_height: Option<i64>, video_bps: u64) -> i32 {
 
 pub fn export_file_name(file_name: &str, in_ms: i64, out_ms: i64, mode: ExportMode) -> String {
     let stem = safe_stem(file_name);
-    let suffix = match mode {
-        ExportMode::Copy => "cut",
-        ExportMode::Compress => "discord",
-    };
-    format!("{stem}_{in_ms}-{out_ms}_{suffix}.mp4")
+    match mode {
+        // Stream copy into mp4 fails for mkv, webm, avi, and wmv. Keep a container that can hold the streams.
+        ExportMode::Copy => format!("{stem}_{in_ms}-{out_ms}_cut.{}", copy_extension(file_name)),
+        ExportMode::Compress => format!("{stem}_{in_ms}-{out_ms}_discord.mp4"),
+    }
+}
+
+fn copy_extension(file_name: &str) -> &'static str {
+    match Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp4" | "m4v" | "mov" => "mp4",
+        "webm" => "webm",
+        "mkv" => "mkv",
+        _ => "mkv",
+    }
 }
 
 pub fn find_tool(name: &str, configured: Option<&Path>) -> Option<PathBuf> {
@@ -134,15 +149,18 @@ pub fn export_args(
     target_bytes: u64,
     height: Option<i64>,
 ) -> Vec<OsString> {
+    // Input -ss is fast and may land on a keyframe. Output -t is a duration, so it stays
+    // correct even when -to would be treated as relative to that seek.
     let mut args = vec![
         OsString::from("-hide_banner"),
+        OsString::from("-nostdin"),
         OsString::from("-y"),
         OsString::from("-ss"),
         OsString::from(ms_arg(in_ms)),
-        OsString::from("-to"),
-        OsString::from(ms_arg(out_ms)),
         OsString::from("-i"),
         input.as_os_str().to_os_string(),
+        OsString::from("-t"),
+        OsString::from(ms_arg(out_ms.saturating_sub(in_ms))),
         OsString::from("-map"),
         OsString::from("0:v:0"),
         OsString::from("-map"),
@@ -196,6 +214,7 @@ pub fn export_args(
 pub fn thumbnail_args(input: &Path, output: &Path, start: &str) -> Vec<OsString> {
     vec![
         OsString::from("-hide_banner"),
+        OsString::from("-nostdin"),
         OsString::from("-y"),
         OsString::from("-ss"),
         OsString::from(start),
@@ -237,6 +256,7 @@ pub fn run_quiet(tool: &Path, args: &[OsString]) -> Result<(), Error> {
 pub fn preview_args(input: &Path, output: &Path) -> Vec<OsString> {
     vec![
         OsString::from("-hide_banner"),
+        OsString::from("-nostdin"),
         OsString::from("-y"),
         OsString::from("-i"),
         input.as_os_str().to_os_string(),
@@ -336,17 +356,15 @@ pub fn run_tool(
     if let Some(stdout) = child.stdout.take() {
         let reader = BufReader::new(stdout);
         for line in reader.lines().map_while(Result::ok) {
-            if let Some(raw) = line.strip_prefix("out_time_ms=") {
-                if let Ok(value) = raw.trim().parse::<u64>() {
-                    let _ = app.emit(
-                        "export-progress",
-                        JobProgress {
-                            clip_id,
-                            phase,
-                            ratio: progress_ratio(value, duration_ms),
-                        },
-                    );
-                }
+            if let Some(us) = progress_microseconds(&line) {
+                let _ = app.emit(
+                    "export-progress",
+                    JobProgress {
+                        clip_id,
+                        phase,
+                        ratio: progress_ratio(us, duration_ms),
+                    },
+                );
             }
         }
     }
@@ -398,15 +416,37 @@ pub fn probe_file(ffprobe: &Path, input: &Path) -> Result<Probe, Error> {
     parse_probe(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn progress_ratio(out_time_raw: u64, duration_ms: i64) -> f32 {
+fn progress_microseconds(line: &str) -> Option<u64> {
+    // out_time_ms is a long-standing FFmpeg misnomer: it is microseconds, same as out_time_us.
+    if let Some(raw) = line
+        .strip_prefix("out_time_us=")
+        .or_else(|| line.strip_prefix("out_time_ms="))
+    {
+        return raw.trim().parse().ok();
+    }
+    line.strip_prefix("out_time=")
+        .and_then(|raw| parse_clock_us(raw.trim()))
+}
+
+fn parse_clock_us(value: &str) -> Option<u64> {
+    let (hms, frac) = value.split_once('.').unwrap_or((value, "0"));
+    let mut parts = hms.split(':');
+    let hours: u64 = parts.next()?.parse().ok()?;
+    let minutes: u64 = parts.next()?.parse().ok()?;
+    let seconds: u64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || minutes >= 60 || seconds >= 60 {
+        return None;
+    }
+    let digits: String = frac.chars().take(6).collect();
+    let micros: u64 = format!("{digits:0<6}").parse().ok()?;
+    Some((hours * 3600 + minutes * 60 + seconds) * 1_000_000 + micros)
+}
+
+fn progress_ratio(out_time_us: u64, duration_ms: i64) -> f32 {
     if duration_ms <= 0 {
         return 0.0;
     }
-    let elapsed_ms = if out_time_raw > (duration_ms as u64).saturating_mul(50) {
-        out_time_raw / 1000
-    } else {
-        out_time_raw
-    };
+    let elapsed_ms = out_time_us / 1000;
     (elapsed_ms as f32 / duration_ms as f32).clamp(0.0, 1.0)
 }
 
@@ -520,8 +560,30 @@ mod tests {
         );
         assert!(args.iter().any(|arg| arg == "-c"));
         assert!(args.iter().any(|arg| arg == "copy"));
+        assert!(args.iter().any(|arg| arg == "-t"));
+        assert!(!args.iter().any(|arg| arg == "-to"));
         assert!(args.iter().any(|arg| arg == r"C:\Clips\loss.mp4"));
         assert!(!args.iter().any(|arg| arg.to_string_lossy().contains("&&")));
+        assert_eq!(
+            export_file_name("round.mkv", 0, 1500, ExportMode::Copy),
+            "round_0-1500_cut.mkv"
+        );
+        assert_eq!(
+            export_file_name("round.avi", 0, 1500, ExportMode::Copy),
+            "round_0-1500_cut.mkv"
+        );
+    }
+
+    #[test]
+    fn progress_treats_ffmpeg_time_as_microseconds() {
+        assert!((progress_ratio(5_000_000, 10_000) - 0.5).abs() < 0.01);
+        // First second of a 10 minute encode must not jump to 100%.
+        assert!(progress_ratio(1_000_000, 600_000) < 0.01);
+        assert_eq!(parse_clock_us("00:00:05.500000"), Some(5_500_000));
+        assert_eq!(
+            progress_microseconds("out_time_ms=1500000"),
+            Some(1_500_000)
+        );
     }
 
     #[test]

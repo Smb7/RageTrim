@@ -74,26 +74,40 @@ impl Database {
         modified_ms: i64,
     ) -> Result<Upsert, Error> {
         let existing = self.conn.query_row(
-            "SELECT size_bytes, modified_ms, missing FROM clips WHERE path = ?1",
+            "SELECT size_bytes, modified_ms, missing, path
+             FROM clips
+             WHERE path = ?1 COLLATE NOCASE
+             LIMIT 1",
             params![path],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         );
         match existing {
-            Ok((size, modified, missing)) => {
-                let changed = size != size_bytes || modified != modified_ms || missing != 0;
+            Ok((size, modified, missing, stored_path)) => {
+                let changed = size != size_bytes
+                    || modified != modified_ms
+                    || missing != 0
+                    || stored_path != path;
                 if changed {
                     self.conn.execute(
                         "UPDATE clips
-                         SET folder_id = ?1, file_name = ?2, size_bytes = ?3,
-                             modified_ms = ?4, missing = 0
-                         WHERE path = ?5",
-                        params![folder_id, file_name, size_bytes, modified_ms, path],
+                         SET folder_id = ?1, path = ?2, file_name = ?3, size_bytes = ?4,
+                             modified_ms = ?5, missing = 0
+                         WHERE path = ?6",
+                        params![
+                            folder_id,
+                            path,
+                            file_name,
+                            size_bytes,
+                            modified_ms,
+                            stored_path
+                        ],
                     )?;
                     Ok(Upsert::Updated)
                 } else {
@@ -121,10 +135,11 @@ impl Database {
             .conn
             .prepare("SELECT path FROM clips WHERE folder_id = ?1 AND missing = 0")?;
         let present = stmt.query_map(params![folder_id], |row| row.get::<_, String>(0))?;
+        let seen_keys: HashSet<String> = seen.iter().map(|path| path_key(path)).collect();
         let mut missing = Vec::new();
         for path in present {
             let path = path?;
-            if !seen.contains(&path) {
+            if !seen_keys.contains(&path_key(&path)) {
                 missing.push(path);
             }
         }
@@ -142,6 +157,14 @@ impl Database {
         }
         tx.commit()?;
         Ok(missing.len() as u32)
+    }
+
+    pub fn mark_folder_missing(&self, folder_id: i64) -> Result<u32, Error> {
+        let changed = self.conn.execute(
+            "UPDATE clips SET missing = 1 WHERE folder_id = ?1 AND missing = 0",
+            params![folder_id],
+        )?;
+        Ok(changed as u32)
     }
 
     pub fn list_clips(&self) -> Result<Vec<Clip>, Error> {
@@ -314,6 +337,10 @@ pub enum Upsert {
     Unchanged,
 }
 
+fn path_key(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
+}
+
 fn map_clip(row: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
     Ok(Clip {
         id: row.get(0)?,
@@ -448,6 +475,33 @@ mod tests {
 
         db.remove_folder(folder.id).unwrap();
         assert!(db.list_clips().unwrap().is_empty());
+        drop(db);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn case_only_path_change_keeps_the_viewed_mark() {
+        let (db, dir) = temp_db();
+        let folder = db.add_folder(r"C:\Clips").unwrap();
+        db.upsert_clip(folder.id, r"C:\Clips\Loss.mp4", "Loss.mp4", 12, 99)
+            .unwrap();
+        let clip = db.list_clips().unwrap().pop().unwrap();
+        db.set_viewed(clip.id, true).unwrap();
+
+        let again = db
+            .upsert_clip(folder.id, r"C:\Clips\loss.mp4", "loss.mp4", 18, 100)
+            .unwrap();
+        assert_eq!(again, Upsert::Updated);
+        let clips = db.list_clips().unwrap();
+        assert_eq!(clips.len(), 1);
+        assert_eq!(clips[0].path, r"C:\Clips\loss.mp4");
+        assert!(clips[0].viewed_at.is_some());
+        assert!(!clips[0].missing);
+
+        let mut seen = HashSet::new();
+        seen.insert(r"c:\clips\loss.mp4".to_string());
+        assert_eq!(db.mark_missing_unseen(folder.id, &seen).unwrap(), 0);
+
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
     }

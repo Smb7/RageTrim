@@ -8,6 +8,7 @@ use crate::error::Error;
 const SERVICE: &str = "RageTrim";
 const ACCOUNT: &str = "discord-webhook";
 const MAX_MESSAGE: usize = 2000;
+const MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,10 +74,18 @@ pub fn post_file(path: &Path, file_name: &str, message: &str) -> Result<(), Erro
     let url = load_webhook()?;
     let message = clean_message(message)?;
     let file_name = safe_file_name(file_name);
+    let len = std::fs::metadata(path)
+        .map_err(|_| Error::message("Couldn't read the export."))?
+        .len();
+    if len > MAX_UPLOAD_BYTES {
+        return Err(Error::message(
+            "That export is over 100 MB. Discord will reject it. Export a smaller compress and post that.",
+        ));
+    }
     let file = reqwest::blocking::multipart::Part::file(path)
         .map_err(|_| Error::message("Couldn't read the export."))?
-        .file_name(file_name)
-        .mime_str("video/mp4")
+        .file_name(file_name.clone())
+        .mime_str(video_mime(&file_name))
         .map_err(|_| Error::message("Couldn't prepare the upload."))?;
     let payload = serde_json::json!({ "content": message }).to_string();
     let form = reqwest::blocking::multipart::Form::new()
@@ -169,6 +178,23 @@ fn rate_limit_message(response: reqwest::blocking::Response) -> String {
     format!("Discord asked us to wait {retry:.0} seconds.")
 }
 
+fn video_mime(file_name: &str) -> &'static str {
+    match Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "webm" => "video/webm",
+        "mov" => "video/quicktime",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "wmv" => "video/x-ms-wmv",
+        _ => "video/mp4",
+    }
+}
+
 fn safe_file_name(file_name: &str) -> String {
     let name = Path::new(file_name)
         .file_name()
@@ -205,5 +231,7 @@ mod tests {
         assert!(normalize_webhook("https://user:pass@discord.com/api/webhooks/1/token").is_err());
         assert!(clean_message("  hello  ").unwrap() == "hello");
         assert!(clean_message(&"x".repeat(2001)).is_err());
+        assert_eq!(video_mime("loss.mkv"), "video/x-matroska");
+        assert_eq!(video_mime("loss.MP4"), "video/mp4");
     }
 }

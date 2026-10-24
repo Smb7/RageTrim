@@ -9,9 +9,11 @@
 
   onMount(() => {
     let cancelled = false;
-    void ensureThumbnail(clip.id).then((path) => {
-      if (!cancelled && path) src = convertFileSrc(path);
-    });
+    void ensureThumbnail(clip.id)
+      .then((path) => {
+        if (!cancelled && path) src = convertFileSrc(path);
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
