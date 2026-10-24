@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
   import Player from "$lib/components/Player.svelte";
+  import Thumb from "$lib/components/Thumb.svelte";
   import {
     addFolder,
     errorText,
@@ -35,18 +37,47 @@
   let busy = $state(false);
   let error = $state("");
   let summary = $state<ScanSummary | null>(null);
+  const filters = ["all", "new", "viewed", "edited", "posted"] as const;
+  let filter = $state<(typeof filters)[number]>("all");
 
   let selected = $derived(clips.find((clip) => clip.id === selectedId) ?? null);
   let trimming = $derived(clips.find((clip) => clip.id === trimmingId) ?? null);
   let visibleCount = $derived(clips.filter((clip) => !clip.missing).length);
-  let newCount = $derived(clips.filter((clip) => !clip.missing && clip.viewedAt == null).length);
+  const filterLabels: Record<(typeof filters)[number], string> = {
+    all: "All",
+    new: "New",
+    viewed: "Viewed",
+    edited: "Edited",
+    posted: "Posted",
+  };
+
+  function isNew(clip: Clip): boolean {
+    return !clip.missing && clip.viewedAt == null && clip.editedAt == null && clip.postedAt == null;
+  }
+
+  let shown = $derived(
+    clips.filter((clip) => {
+      if (filter === "new") return isNew(clip);
+      if (filter === "viewed") return clip.viewedAt != null;
+      if (filter === "edited") return clip.editedAt != null;
+      if (filter === "posted") return clip.postedAt != null;
+      return true;
+    }),
+  );
+  let newCount = $derived(clips.filter(isNew).length);
 
   onMount(() => {
     void refresh();
+    const unlisten = listen("library-changed", () => {
+      void refresh(true);
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
   });
 
-  async function refresh() {
-    error = "";
+  async function refresh(quiet = false) {
+    if (!quiet) error = "";
     try {
       folders = await listFolders();
       clips = await listClips();
@@ -273,6 +304,13 @@
         <h2>Clips</h2>
         <p>{visibleCount} on disk · {newCount} new</p>
       </div>
+      <div class="filters">
+        {#each filters as name (name)}
+          <button class="ghost" class:active={filter === name} type="button" onclick={() => (filter = name)}>
+            {filterLabels[name]}
+          </button>
+        {/each}
+      </div>
 
       {#if error}
         <div class="banner" role="alert">{error}</div>
@@ -304,11 +342,19 @@
           <strong>No clips in the library</strong>
           Scan after a match, or pick a folder that already has videos.
         </div>
+      {:else if shown.length === 0}
+        <div class="empty">
+          <strong>Nothing in this filter</strong>
+          Try another filter, or scan again.
+        </div>
       {:else}
         <ul class="clip-grid">
-          {#each clips as clip (clip.id)}
+          {#each shown as clip (clip.id)}
             <li class:selected={clip.id === selectedId} class:missing={clip.missing} class="card">
               <button class="card-select" type="button" onclick={() => (selectedId = clip.id)}>
+                {#key `${clip.id}-${clip.modifiedMs}`}
+                  <Thumb {clip} />
+                {/key}
                 <h3 title={clip.fileName}>{clip.fileName}</h3>
                 <p>
                   {clip.missing ? "Missing · " : ""}{formatBytes(clip.sizeBytes)} · {formatWhen(clip.modifiedMs)}

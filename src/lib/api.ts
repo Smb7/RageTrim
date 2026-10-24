@@ -30,6 +30,10 @@ export function listClips(): Promise<Clip[]> {
   return invoke("list_clips");
 }
 
+export function ensureThumbnail(id: number): Promise<string | null> {
+  return invoke("ensure_thumbnail", { id });
+}
+
 export function setViewed(id: number, viewed: boolean): Promise<Clip> {
   return invoke("set_viewed", { id, viewed });
 }

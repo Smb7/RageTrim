@@ -84,6 +84,8 @@ pub fn scan_folder(
             &mut summary,
             format!("{} is missing. Remove it or add it again.", root.display()),
         );
+        // Keep the rows so viewed marks survive a drive that comes back. Just don't pretend the files are here.
+        summary.marked_missing += db.mark_folder_missing(folder.id)?;
         return Ok(summary);
     }
 
@@ -136,6 +138,12 @@ pub fn scan_folder(
             summary.skipped += 1;
             continue;
         }
+        if let Some(export_dir) = export_dir {
+            if paths_overlap(export_dir, entry.path()) {
+                summary.skipped += 1;
+                continue;
+            }
+        }
         let meta = match entry.metadata() {
             Ok(meta) => meta,
             Err(_) => {
@@ -185,6 +193,22 @@ pub fn is_skipped_dir(name: &OsStr) -> bool {
     name.starts_with('.') || SKIP_DIRS.iter().any(|skip| name.eq_ignore_ascii_case(skip))
 }
 
+pub fn paths_overlap(left: &Path, right: &Path) -> bool {
+    let left = comparable_path(left);
+    let right = comparable_path(right);
+    paths_equal(&left, &right) || path_is_inside(&left, &right) || path_is_inside(&right, &left)
+}
+
+pub fn contained_file(root: &Path, candidate: &Path) -> Result<PathBuf, Error> {
+    let root = dunce::canonicalize(root).map_err(|_| Error::message("That folder is missing."))?;
+    let candidate =
+        dunce::canonicalize(candidate).map_err(|_| Error::message("That file is missing."))?;
+    if !path_is_inside(&root, &candidate) {
+        return Err(Error::message("That file is outside the allowed folder."));
+    }
+    Ok(candidate)
+}
+
 pub fn is_drive_root(path: &Path) -> bool {
     let mut components = path.components();
     match (components.next(), components.next(), components.next()) {
@@ -192,6 +216,20 @@ pub fn is_drive_root(path: &Path) -> bool {
         (Some(Component::RootDir), None, _) => true,
         _ => false,
     }
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    if let Ok(path) = dunce::canonicalize(path) {
+        return path;
+    }
+    if let Some(parent) = path.parent() {
+        if let Ok(parent) = dunce::canonicalize(parent) {
+            if let Some(name) = path.file_name() {
+                return parent.join(name);
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 fn paths_equal(left: &Path, right: &Path) -> bool {
@@ -261,6 +299,23 @@ mod tests {
     }
 
     #[test]
+    fn export_folder_overlaps_a_watched_folder() {
+        let clips = Path::new(r"C:\RageTrimTestOnly\Clips");
+        assert!(paths_overlap(
+            clips,
+            Path::new(r"C:\RageTrimTestOnly\Clips\RageTrim")
+        ));
+        assert!(paths_overlap(
+            Path::new(r"C:\RageTrimTestOnly\Clips\RageTrim"),
+            clips
+        ));
+        assert!(!paths_overlap(
+            clips,
+            Path::new(r"D:\RageTrimTestOnly\Exports")
+        ));
+    }
+
+    #[test]
     fn scan_indexes_videos_and_marks_missing_files() {
         let dir = std::env::temp_dir().join(format!(
             "ragetrim-scan-{}-{}",
@@ -294,5 +349,34 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn missing_folder_marks_clips_missing_without_dropping_marks() {
+        let root = std::env::temp_dir().join(format!(
+            "ragetrim-missing-{}-{}",
+            std::process::id(),
+            crate::db::now_ms()
+        ));
+        let clips = root.join("clips");
+        let db_dir = root.join("db");
+        std::fs::create_dir_all(&clips).unwrap();
+        std::fs::create_dir_all(&db_dir).unwrap();
+        std::fs::write(clips.join("loss.mp4"), b"not-empty").unwrap();
+        let db = Database::open(&db_dir.join("test.db")).unwrap();
+        let folder = db.add_folder(&clips.to_string_lossy()).unwrap();
+        assert_eq!(scan_folder(&db, &folder, None).unwrap().added, 1);
+        let clip = db.list_clips().unwrap().pop().unwrap();
+        db.set_viewed(clip.id, true).unwrap();
+
+        std::fs::remove_dir_all(&clips).unwrap();
+        let summary = scan_folder(&db, &folder, None).unwrap();
+        assert_eq!(summary.marked_missing, 1);
+        let clip = db.list_clips().unwrap().pop().unwrap();
+        assert!(clip.missing);
+        assert!(clip.viewed_at.is_some());
+
+        drop(db);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1,7 +1,7 @@
 {
   "name": "ragetrim",
   "version": "0.1.0",
-  "description": "Browse local clips and mark what you have already watched.",
+  "description": "Browse local clips, trim them, and post to Discord.",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
