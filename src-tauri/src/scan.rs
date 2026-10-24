@@ -64,14 +64,19 @@ pub fn nested_conflict(existing: &[Folder], candidate: &Path) -> Option<String> 
 }
 
 pub fn scan_all(db: &Database) -> Result<ScanSummary, Error> {
+    let export_dir = db.export_dir().ok();
     let mut summary = ScanSummary::empty();
     for folder in db.list_folders()? {
-        summary.merge(scan_folder(db, &folder)?);
+        summary.merge(scan_folder(db, &folder, export_dir.as_deref())?);
     }
     Ok(summary)
 }
 
-pub fn scan_folder(db: &Database, folder: &Folder) -> Result<ScanSummary, Error> {
+pub fn scan_folder(
+    db: &Database,
+    folder: &Folder,
+    export_dir: Option<&Path>,
+) -> Result<ScanSummary, Error> {
     let root = PathBuf::from(&folder.path);
     if !root.is_dir() {
         let mut summary = ScanSummary::empty();
@@ -89,7 +94,17 @@ pub fn scan_folder(db: &Database, folder: &Folder) -> Result<ScanSummary, Error>
         .follow_links(false)
         .max_depth(MAX_DEPTH)
         .into_iter()
-        .filter_entry(|entry| entry.depth() == 0 || !is_skipped_dir(entry.file_name()));
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            if let Some(export_dir) = export_dir {
+                if paths_equal(entry.path(), export_dir) {
+                    return false;
+                }
+            }
+            !is_skipped_dir(entry.file_name())
+        });
 
     for entry in walker {
         if seen.len() >= MAX_VIDEOS {
@@ -264,7 +279,7 @@ mod tests {
         let db = Database::open(&db_dir.join("test.db")).unwrap();
         let folder = db.add_folder(&dir.to_string_lossy()).unwrap();
 
-        let summary = scan_folder(&db, &folder).unwrap();
+        let summary = scan_folder(&db, &folder, None).unwrap();
         assert_eq!(summary.added, 1);
         assert_eq!(summary.skipped, 1);
         let clips = db.list_clips().unwrap();
@@ -273,7 +288,7 @@ mod tests {
         assert!(!clips[0].missing);
 
         std::fs::remove_file(dir.join("kept").join("loss.mp4")).unwrap();
-        let summary = scan_folder(&db, &folder).unwrap();
+        let summary = scan_folder(&db, &folder, None).unwrap();
         assert_eq!(summary.marked_missing, 1);
         assert!(db.list_clips().unwrap()[0].missing);
 

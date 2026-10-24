@@ -1,26 +1,35 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Player from "$lib/components/Player.svelte";
   import {
     addFolder,
     errorText,
+    getSettings,
     listClips,
     listFolders,
+    pickFfmpeg,
     pickFolder,
     removeFolder,
     scanFolders,
+    setEdited,
+    setExportDir,
+    setFfmpegPath,
     setViewed,
   } from "$lib/api";
   import { clipLocation, formatBytes, formatWhen, scanStatus, shortPath } from "$lib/format";
-  import type { Clip, Folder, ScanSummary } from "$lib/types";
+  import type { AppSettings, Clip, Folder, ScanSummary } from "$lib/types";
 
   let folders = $state<Folder[]>([]);
   let clips = $state<Clip[]>([]);
   let selectedId = $state<number | null>(null);
+  let trimmingId = $state<number | null>(null);
+  let settings = $state<AppSettings | null>(null);
   let busy = $state(false);
   let error = $state("");
   let summary = $state<ScanSummary | null>(null);
 
   let selected = $derived(clips.find((clip) => clip.id === selectedId) ?? null);
+  let trimming = $derived(clips.find((clip) => clip.id === trimmingId) ?? null);
   let visibleCount = $derived(clips.filter((clip) => !clip.missing).length);
   let newCount = $derived(clips.filter((clip) => !clip.missing && clip.viewedAt == null).length);
 
@@ -33,6 +42,7 @@
     try {
       folders = await listFolders();
       clips = await listClips();
+      settings = await getSettings();
       if (selectedId != null && !clips.some((clip) => clip.id === selectedId)) {
         selectedId = null;
       }
@@ -82,11 +92,46 @@
     }
   }
 
+  async function chooseExportDir() {
+    error = "";
+    try {
+      const path = await pickFolder("Choose an export folder");
+      if (!path) return;
+      settings = await setExportDir(path);
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function locateFfmpeg() {
+    error = "";
+    try {
+      const path = await pickFfmpeg();
+      if (!path) return;
+      settings = await setFfmpegPath(path);
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  function replaceClip(updated: Clip) {
+    clips = clips.map((item) => (item.id === updated.id ? updated : item));
+  }
+
   async function toggleViewed(clip: Clip) {
     error = "";
     try {
       const updated = await setViewed(clip.id, clip.viewedAt == null);
-      clips = clips.map((item) => (item.id === updated.id ? updated : item));
+      replaceClip(updated);
+    } catch (err) {
+      error = errorText(err);
+    }
+  }
+
+  async function toggleEdited(clip: Clip) {
+    error = "";
+    try {
+      replaceClip(await setEdited(clip.id, clip.editedAt == null));
     } catch (err) {
       error = errorText(err);
     }
@@ -135,6 +180,15 @@
           {/each}
         </ul>
       {/if}
+      {#if settings}
+        <div class="tool-box">
+          <h2>Export</h2>
+          <p title={settings.exportDir}>{shortPath(settings.exportDir)}</p>
+          <button class="ghost" type="button" disabled={busy} onclick={chooseExportDir}>Change folder</button>
+          <p>{settings.ffmpegPath ? "FFmpeg found" : "FFmpeg missing"}</p>
+          <button class="ghost" type="button" disabled={busy} onclick={locateFfmpeg}>Locate FFmpeg</button>
+        </div>
+      {/if}
     </aside>
 
     <section class="library">
@@ -155,7 +209,15 @@
         </div>
       {/if}
 
-      {#if folders.length === 0}
+      {#if trimming && settings}
+        <Player
+          clip={trimming}
+          {settings}
+          onBack={() => (trimmingId = null)}
+          onClip={replaceClip}
+          onSettings={(next) => (settings = next)}
+        />
+      {:else if folders.length === 0}
         <div class="empty">
           <strong>No folders yet</strong>
           Add a clip folder to start the library.
@@ -184,21 +246,33 @@
                 >
                   {clip.viewedAt == null ? "Mark viewed" : "Viewed"}
                 </button>
+                <button
+                  class="pill {clip.editedAt == null ? 'new' : 'viewed'}"
+                  type="button"
+                  onclick={() => toggleEdited(clip)}
+                >
+                  {clip.editedAt == null ? "Mark edited" : "Edited"}
+                </button>
               </div>
             </li>
           {/each}
         </ul>
       {/if}
 
-      {#if selected}
+      {#if selected && !trimming}
         <div class="detail">
           <div>
             <strong>{selected.fileName}</strong>
             <code title={selected.path}>{selected.path}</code>
           </div>
-          <button class="ghost" type="button" onclick={() => toggleViewed(selected)}>
-            {selected.viewedAt == null ? "Mark viewed" : "Mark as new"}
-          </button>
+          <div class="card-actions">
+            <button class="ghost" type="button" onclick={() => toggleViewed(selected)}>
+              {selected.viewedAt == null ? "Mark viewed" : "Mark as new"}
+            </button>
+            <button class="primary" type="button" disabled={selected.missing} onclick={() => (trimmingId = selected.id)}>
+              Trim
+            </button>
+          </div>
         </div>
       {/if}
     </section>
