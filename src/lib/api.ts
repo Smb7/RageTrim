@@ -78,10 +78,6 @@ export function setCompressTarget(bytes: number): Promise<AppSettings> {
   return invoke("set_compress_target", { bytes });
 }
 
-export function setFfmpegPath(path: string): Promise<AppSettings> {
-  return invoke("set_ffmpeg_path", { path });
-}
-
 export function probeClip(id: number): Promise<Clip> {
   return invoke("probe_clip", { id });
 }
@@ -104,16 +100,6 @@ export async function pickFolder(title = "Choose a clip folder"): Promise<string
     directory: true,
     multiple: false,
     title,
-  });
-  return typeof selected === "string" ? selected : null;
-}
-
-export async function pickFfmpeg(): Promise<string | null> {
-  const selected = await open({
-    directory: false,
-    multiple: false,
-    title: "Locate ffmpeg.exe",
-    filters: [{ name: "FFmpeg", extensions: ["exe"] }],
   });
   return typeof selected === "string" ? selected : null;
 }

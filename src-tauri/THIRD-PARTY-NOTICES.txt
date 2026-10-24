@@ -1,0 +1,5 @@
+RageTrim is licensed under the MIT License. See the LICENSE file in the repository root.
+
+The Windows installer also includes FFmpeg binaries (ffmpeg.exe and ffprobe.exe). FFmpeg is not covered by the MIT License. The pinned build is Gyan Doshi's FFmpeg 9.0.2 essentials build for Windows x64, licensed under the GNU General Public License version 3. RageTrim does not link FFmpeg into ragetrim.exe. It starts ffmpeg.exe and ffprobe.exe as separate processes.
+
+FFmpeg's own license file is installed in the ffmpeg folder next to those programs. The download URL and SHA-256 checksum are recorded in ffmpeg-bundle.json.

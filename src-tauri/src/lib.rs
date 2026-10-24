@@ -15,7 +15,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::db::{Database, app_data_dir};
 use crate::error::Error;
 use crate::ffmpeg::{
-    ExportMode, export_args, export_file_name, find_tool, is_ffmpeg_binary, preview_args,
+    ExportMode, bundled_tool_dirs, export_args, export_file_name, find_tool, preview_args,
     probe_file, run_quiet, run_tool, thumbnail_args, validate_range,
 };
 use crate::models::{AppSettings, Clip, ExportResult, Folder, ScanSummary};
@@ -26,6 +26,7 @@ pub struct AppState {
     busy: Arc<AtomicBool>,
     thumbs: Mutex<()>,
     watcher: Mutex<Option<notify::RecommendedWatcher>>,
+    tool_dirs: Vec<PathBuf>,
 }
 
 struct BusyGuard(Arc<AtomicBool>);
@@ -122,10 +123,12 @@ fn ensure_thumbnail(state: State<AppState>, id: i64) -> Result<Option<String>, E
     {
         return Ok(Some(output.to_string_lossy().into_owned()));
     }
+    let tool_dirs = state.tool_dirs.clone();
     let db = lock_db(&state)?;
     let Some(ffmpeg) = find_tool(
         "ffmpeg",
         db.get_setting("ffmpeg_path")?.as_deref().map(Path::new),
+        &tool_dirs,
     ) else {
         return Ok(None);
     };
@@ -228,8 +231,9 @@ fn post_clip(state: State<AppState>, id: i64, message: String) -> Result<Clip, E
 
 #[tauri::command]
 fn get_settings(state: State<AppState>) -> Result<AppSettings, Error> {
+    let tool_dirs = state.tool_dirs.clone();
     let db = lock_db(&state)?;
-    settings_from(&db)
+    settings_from(&db, &tool_dirs)
 }
 
 #[tauri::command]
@@ -241,6 +245,7 @@ fn set_export_dir(
     let canonical = normalize_folder(Path::new(&path))?;
     std::fs::create_dir_all(&canonical)?;
     allow_asset_dir(&app, &canonical)?;
+    let tool_dirs = state.tool_dirs.clone();
     let db = lock_db(&state)?;
     if db
         .list_folders()?
@@ -252,7 +257,7 @@ fn set_export_dir(
         ));
     }
     db.set_setting("export_dir", &canonical.to_string_lossy())?;
-    settings_from(&db)
+    settings_from(&db, &tool_dirs)
 }
 
 #[tauri::command]
@@ -264,30 +269,20 @@ fn set_compress_target(state: State<AppState>, bytes: u64) -> Result<AppSettings
             "Compress target must be between 1 MB and 100 MB.",
         ));
     }
+    let tool_dirs = state.tool_dirs.clone();
     let db = lock_db(&state)?;
     db.set_setting("compress_target_bytes", &bytes.to_string())?;
-    settings_from(&db)
-}
-
-#[tauri::command]
-fn set_ffmpeg_path(state: State<AppState>, path: String) -> Result<AppSettings, Error> {
-    let path = PathBuf::from(path);
-    if !path.is_file() || !is_ffmpeg_binary(&path) {
-        return Err(Error::message("Pick ffmpeg.exe."));
-    }
-    let canonical = dunce::canonicalize(&path).unwrap_or(path);
-    let db = lock_db(&state)?;
-    db.set_setting("ffmpeg_path", &canonical.to_string_lossy())?;
-    settings_from(&db)
+    settings_from(&db, &tool_dirs)
 }
 
 #[tauri::command]
 fn probe_clip(state: State<AppState>, id: i64) -> Result<Clip, Error> {
     let (input, ffprobe) = {
+        let tool_dirs = state.tool_dirs.clone();
         let db = lock_db(&state)?;
         let clip = db.clip_by_id(id)?;
         let input = clip_source(&clip)?;
-        let ffprobe = required_tool(&db, "ffprobe")?;
+        let ffprobe = required_tool(&db, "ffprobe", &tool_dirs)?;
         (input, ffprobe)
     };
     let probe = probe_file(&ffprobe, &input)?;
@@ -305,10 +300,11 @@ fn probe_clip(state: State<AppState>, id: i64) -> Result<Clip, Error> {
 fn make_preview(app: AppHandle, state: State<AppState>, id: i64) -> Result<String, Error> {
     let _job = begin_job(&state)?;
     let (input, ffmpeg, output, duration_ms) = {
+        let tool_dirs = state.tool_dirs.clone();
         let db = lock_db(&state)?;
         let clip = db.clip_by_id(id)?;
         let input = clip_source(&clip)?;
-        let ffmpeg = required_tool(&db, "ffmpeg")?;
+        let ffmpeg = required_tool(&db, "ffmpeg", &tool_dirs)?;
         let dir = app_data_dir()?.join("proxies");
         std::fs::create_dir_all(&dir)?;
         let output = dir.join(format!("{}-{}.mp4", clip.id, clip.modified_ms));
@@ -343,11 +339,12 @@ fn export_clip(
     let _job = begin_job(&state)?;
     let mode = ExportMode::parse(&mode)?;
     let (input, ffmpeg, output, target, height) = {
+        let tool_dirs = state.tool_dirs.clone();
         let db = lock_db(&state)?;
         let clip = db.clip_by_id(id)?;
         let input = clip_source(&clip)?;
         validate_range(in_ms, out_ms, clip.duration_ms)?;
-        let ffmpeg = required_tool(&db, "ffmpeg")?;
+        let ffmpeg = required_tool(&db, "ffmpeg", &tool_dirs)?;
         let export_dir = db.export_dir()?;
         std::fs::create_dir_all(&export_dir)?;
         allow_asset_dir(&app, &export_dir)?;
@@ -382,10 +379,10 @@ fn export_clip(
     })
 }
 
-fn settings_from(db: &Database) -> Result<AppSettings, Error> {
+fn settings_from(db: &Database, tool_dirs: &[PathBuf]) -> Result<AppSettings, Error> {
     let configured = db.get_setting("ffmpeg_path")?.map(PathBuf::from);
-    let ffmpeg = find_tool("ffmpeg", configured.as_deref());
-    let ffprobe = find_tool("ffprobe", ffmpeg.as_deref());
+    let ffmpeg = find_tool("ffmpeg", configured.as_deref(), tool_dirs);
+    let ffprobe = find_tool("ffprobe", ffmpeg.as_deref(), tool_dirs);
     Ok(AppSettings {
         export_dir: db.export_dir()?.to_string_lossy().into_owned(),
         compress_target_bytes: db.compress_target_bytes()?,
@@ -394,11 +391,10 @@ fn settings_from(db: &Database) -> Result<AppSettings, Error> {
     })
 }
 
-fn required_tool(db: &Database, name: &str) -> Result<PathBuf, Error> {
+fn required_tool(db: &Database, name: &str, tool_dirs: &[PathBuf]) -> Result<PathBuf, Error> {
     let configured = db.get_setting("ffmpeg_path")?.map(PathBuf::from);
-    find_tool(name, configured.as_deref()).ok_or_else(|| {
-        Error::message("FFmpeg was not found. Install it or point RageTrim at ffmpeg.exe.")
-    })
+    find_tool(name, configured.as_deref(), tool_dirs)
+        .ok_or_else(|| Error::message("video tools failed to load"))
 }
 
 fn begin_job(state: &AppState) -> Result<BusyGuard, Error> {
@@ -480,11 +476,13 @@ pub fn run() {
             let export_dir = db.export_dir()?;
             std::fs::create_dir_all(&export_dir)?;
             allow_asset_dir(&handle, &export_dir)?;
+            let tool_dirs = bundled_tool_dirs(app.path().resource_dir().ok().as_deref());
             app.manage(AppState {
                 db: Mutex::new(db),
                 busy: Arc::new(AtomicBool::new(false)),
                 thumbs: Mutex::new(()),
                 watcher: Mutex::new(None),
+                tool_dirs,
             });
             let handle = app.handle().clone();
             if let Ok(watcher) = watch::start(handle) {
@@ -514,7 +512,6 @@ pub fn run() {
             get_settings,
             set_export_dir,
             set_compress_target,
-            set_ffmpeg_path,
             probe_clip,
             make_preview,
             export_clip

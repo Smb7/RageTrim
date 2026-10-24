@@ -1,0 +1,9 @@
+{
+  "name": "FFmpeg essentials static build",
+  "version": "9.0.2",
+  "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip",
+  "sha256": "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba",
+  "license": "GPLv3",
+  "source": "https://github.com/FFmpeg/FFmpeg/commit/946fcce07b",
+  "note": "GyanD Windows x64 static essentials build. Includes ffmpeg.exe and ffprobe.exe, with libx264. GPLv3. Not covered by RageTrim's MIT license. RageTrim spawns these programs; it does not link them."
+}
